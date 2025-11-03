@@ -42,6 +42,10 @@ type CAStore struct {
 func NewCAStore(config CAStoreConfig, stats tally.Scope) (*CAStore, error) {
 	config = config.applyDefaults()
 
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
 	stats = stats.Tagged(map[string]string{
 		"module": "castore",
 	})

@@ -20,6 +20,7 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/uber-go/tally"
@@ -215,4 +216,60 @@ func TestCAStoreCreateCacheFile(t *testing.T) {
 	require.NoError(err)
 	b2, err := io.ReadAll(r2)
 	require.Equal(s1, string(b2))
+}
+func TestCAStoreConfig_WithMemoryCache(t *testing.T) {
+	require := require.New(t)
+
+	config, cleanup := CAStoreConfigFixture()
+	defer cleanup()
+
+	require.Equal(int64(0), config.MemoryCache.MaxSize)
+	require.Equal(0, config.MemoryCache.DrainWorkers)
+	require.Equal(0, config.MemoryCache.DrainMaxRetries)
+
+	config = config.applyDefaults()
+
+	require.Equal(10, config.MemoryCache.DrainWorkers)
+	require.Equal(3, config.MemoryCache.DrainMaxRetries)
+}
+
+func TestCAStoreConfig_Validate_MemoryCacheDisabled(t *testing.T) {
+	require := require.New(t)
+
+	config := CAStoreConfig{
+		MemoryCache: MemoryCacheConfig{
+			Enabled: false,
+			TTL:     0,
+		},
+	}
+
+	require.NoError(config.Validate())
+}
+
+func TestCAStoreConfig_Validate_MemoryCacheEnabledWithoutTTL(t *testing.T) {
+	require := require.New(t)
+
+	config := CAStoreConfig{
+		MemoryCache: MemoryCacheConfig{
+			Enabled: true,
+			TTL:     0,
+		},
+	}
+
+	err := config.Validate()
+	require.Error(err)
+	require.Contains(err.Error(), "memory_cache_ttl must be specified")
+}
+
+func TestCAStoreConfig_Validate_MemoryCacheEnabledWithTTL(t *testing.T) {
+	require := require.New(t)
+
+	config := CAStoreConfig{
+		MemoryCache: MemoryCacheConfig{
+			Enabled: true,
+			TTL:     time.Hour,
+		},
+	}
+
+	require.NoError(config.Validate())
 }
