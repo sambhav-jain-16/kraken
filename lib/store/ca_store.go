@@ -19,6 +19,8 @@ import (
 	"io"
 	"os"
 	"path"
+	"sync"
+	"time"
 
 	"github.com/andres-erbsen/clock"
 	"github.com/docker/distribution/uuid"
@@ -27,15 +29,22 @@ import (
 	"github.com/uber/kraken/core"
 	"github.com/uber/kraken/lib/hrw"
 	"github.com/uber/kraken/lib/store/base"
+	"github.com/uber/kraken/utils/cache"
 )
 
 // CAStore allows uploading / caching content-addressable files.
 type CAStore struct {
 	config CAStoreConfig
+	stats  tally.Scope
 
 	*uploadStore
 	*cacheStore
 	cleanup *cleanupManager
+
+	memCache *cache.BlobMemoryCache
+
+	ttlStopChan chan struct{}
+	ttlWg       sync.WaitGroup
 }
 
 // NewCAStore creates a new CAStore.
@@ -72,11 +81,44 @@ func NewCAStore(config CAStoreConfig, stats tally.Scope) (*CAStore, error) {
 	cleanup.addJob("upload", config.UploadCleanup, uploadStore.newFileOp())
 	cleanup.addJob("cache", config.CacheCleanup, cacheStore.newFileOp())
 
-	return &CAStore{config, uploadStore, cacheStore, cleanup}, nil
+	memCache := createMemoryCache(&config, stats)
+	cas := &CAStore{
+		config:      config,
+		stats:       stats,
+		uploadStore: uploadStore,
+		cacheStore:  cacheStore,
+		cleanup:     cleanup,
+		memCache:    memCache,
+	}
+	initMemoryCacheTTL(cas)
+	return cas, nil
+}
+
+func createMemoryCache(config *CAStoreConfig, stats tally.Scope) *cache.BlobMemoryCache {
+	if !config.MemoryCache.Enabled {
+		return nil
+	}
+	return cache.NewBlobMemoryCache(cache.BlobMemoryCacheConfig{
+		MaxSize: config.MemoryCache.MaxSize,
+	}, stats)
+}
+
+func initMemoryCacheTTL(cas *CAStore) {
+	if cas.memCache == nil {
+		return
+	}
+	cas.ttlStopChan = make(chan struct{})
+	cas.ttlWg.Add(1)
+	go cas.memoryCacheCleanupWorker()
 }
 
 // Close terminates any goroutines started by s.
 func (s *CAStore) Close() {
+	if s.ttlStopChan != nil {
+		close(s.ttlStopChan)
+		s.ttlWg.Wait()
+	}
+
 	s.cleanup.stop()
 }
 
@@ -154,6 +196,32 @@ func (s *CAStore) verify(r io.Reader, name string) error {
 		}
 	}
 	return nil
+}
+
+func (s *CAStore) memoryCacheCleanupWorker() {
+	defer s.ttlWg.Done()
+
+	ticker := time.NewTicker(s.config.MemoryCache.TTL)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.cleanupMemoryCacheExpiredEntries()
+		case <-s.ttlStopChan:
+			return
+		}
+	}
+}
+
+func (s *CAStore) cleanupMemoryCacheExpiredEntries() {
+	now := time.Now()
+
+	expiredNames := s.memCache.GetExpiredEntries(now, s.config.MemoryCache.TTL)
+
+	if len(expiredNames) > 0 {
+		s.memCache.RemoveBatch(expiredNames)
+	}
 }
 
 func initCASVolumes(dir string, volumes []Volume) error {

@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uber-go/tally"
 	"github.com/uber/kraken/core"
+	"github.com/uber/kraken/utils/cache"
 )
 
 func TestCAStoreInitVolumes(t *testing.T) {
@@ -272,4 +273,125 @@ func TestCAStoreConfig_Validate_MemoryCacheEnabledWithTTL(t *testing.T) {
 	}
 
 	require.NoError(config.Validate())
+}
+
+func TestCAStore_InitWithMemoryCache(t *testing.T) {
+	require := require.New(t)
+
+	config, cleanup := CAStoreConfigFixture()
+	defer cleanup()
+
+	config.MemoryCache = MemoryCacheConfig{
+		Enabled: true,
+		MaxSize: 1024 * 1024,
+		TTL:     time.Hour,
+	}
+
+	s, err := NewCAStore(config, tally.NoopScope)
+	require.NoError(err)
+	defer s.Close()
+
+	require.NotNil(s.memCache)
+	require.NotNil(s.ttlStopChan)
+}
+
+func TestCAStore_InitWithoutMemoryCache(t *testing.T) {
+	require := require.New(t)
+
+	config, cleanup := CAStoreConfigFixture()
+	defer cleanup()
+
+	config.MemoryCache.Enabled = false
+
+	s, err := NewCAStore(config, tally.NoopScope)
+	require.NoError(err)
+	defer s.Close()
+
+	require.Nil(s.memCache)
+	require.Nil(s.ttlStopChan)
+}
+
+func TestCAStore_TTLCleanup_RemovesExpiredEntries(t *testing.T) {
+	require := require.New(t)
+
+	config, cleanup := CAStoreConfigFixture()
+	defer cleanup()
+
+	config.MemoryCache = MemoryCacheConfig{
+		Enabled: true,
+		MaxSize: 1024 * 1024,
+		TTL:     100 * time.Millisecond,
+	}
+
+	s, err := NewCAStore(config, tally.NoopScope)
+	require.NoError(err)
+	defer s.Close()
+
+	now := time.Now()
+	oldEntry := &cache.MemoryEntry{
+		Name:      "old",
+		Data:      []byte("old data"),
+		Size:      8,
+		CreatedAt: now.Add(-200 * time.Millisecond),
+	}
+	added, err := s.memCache.Add(oldEntry)
+	require.NoError(err)
+	require.True(added)
+
+	time.Sleep(150 * time.Millisecond)
+
+	s.cleanupMemoryCacheExpiredEntries()
+
+	result := s.memCache.Get("old")
+	require.Nil(result)
+}
+
+func TestCAStore_TTLCleanup_DoesNotRemoveFreshEntries(t *testing.T) {
+	require := require.New(t)
+
+	config, cleanup := CAStoreConfigFixture()
+	defer cleanup()
+
+	config.MemoryCache = MemoryCacheConfig{
+		Enabled: true,
+		MaxSize: 1024 * 1024,
+		TTL:     time.Hour,
+	}
+
+	s, err := NewCAStore(config, tally.NoopScope)
+	require.NoError(err)
+	defer s.Close()
+
+	freshEntry := &cache.MemoryEntry{
+		Name:      "fresh",
+		Data:      []byte("fresh data"),
+		Size:      10,
+		CreatedAt: time.Now(),
+	}
+	added, err := s.memCache.Add(freshEntry)
+	require.NoError(err)
+	require.True(added)
+
+	s.cleanupMemoryCacheExpiredEntries()
+
+	result := s.memCache.Get("fresh")
+	require.NotNil(result)
+}
+
+func TestCAStore_CloseWithTTLWorker(t *testing.T) {
+	require := require.New(t)
+
+	config, cleanup := CAStoreConfigFixture()
+	defer cleanup()
+
+	config.MemoryCache = MemoryCacheConfig{
+		Enabled: true,
+		MaxSize: 1024 * 1024,
+		TTL:     time.Hour,
+	}
+
+	s, err := NewCAStore(config, tally.NoopScope)
+	require.NoError(err)
+
+	s.Close()
 }

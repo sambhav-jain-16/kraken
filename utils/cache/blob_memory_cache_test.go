@@ -427,3 +427,138 @@ func TestBlobMemoryCache_ExactCapacity(t *testing.T) {
 	assert.True(t, added, "Should add when exactly at capacity")
 	assert.Equal(t, int64(1000), cache.TotalBytes())
 }
+
+func TestBlobMemoryCache_GetExpiredEntries_Found(t *testing.T) {
+	cache := NewBlobMemoryCache(
+		BlobMemoryCacheConfig{MaxSize: 1000},
+		tally.NoopScope,
+	)
+
+	now := time.Now()
+	oldEntry := &MemoryEntry{
+		Name:      "old",
+		Data:      []byte("old data"),
+		Size:      8,
+		CreatedAt: now.Add(-2 * time.Hour),
+	}
+	_, err := cache.Add(oldEntry)
+	require.NoError(t, err)
+
+	expiredNames := cache.GetExpiredEntries(now, 1*time.Hour)
+
+	require.Len(t, expiredNames, 1)
+	assert.Equal(t, "old", expiredNames[0])
+}
+
+func TestBlobMemoryCache_GetExpiredEntries_None(t *testing.T) {
+	cache := NewBlobMemoryCache(
+		BlobMemoryCacheConfig{MaxSize: 1000},
+		tally.NoopScope,
+	)
+
+	now := time.Now()
+	freshEntry := &MemoryEntry{
+		Name:      "fresh",
+		Data:      []byte("fresh data"),
+		Size:      10,
+		CreatedAt: now.Add(-30 * time.Minute),
+	}
+	_, err := cache.Add(freshEntry)
+	require.NoError(t, err)
+
+	expiredNames := cache.GetExpiredEntries(now, 1*time.Hour)
+
+	assert.Empty(t, expiredNames)
+}
+
+func TestBlobMemoryCache_GetExpiredEntries_Partial(t *testing.T) {
+	cache := NewBlobMemoryCache(
+		BlobMemoryCacheConfig{MaxSize: 1000},
+		tally.NoopScope,
+	)
+
+	now := time.Now()
+	entries := []*MemoryEntry{
+		{Name: "old1", Data: []byte("data"), Size: 4, CreatedAt: now.Add(-2 * time.Hour)},
+		{Name: "fresh", Data: []byte("data"), Size: 4, CreatedAt: now.Add(-30 * time.Minute)},
+		{Name: "old2", Data: []byte("data"), Size: 4, CreatedAt: now.Add(-3 * time.Hour)},
+	}
+
+	for _, entry := range entries {
+		_, err := cache.Add(entry)
+		require.NoError(t, err)
+	}
+
+	expiredNames := cache.GetExpiredEntries(now, 1*time.Hour)
+
+	require.Len(t, expiredNames, 2)
+	assert.Contains(t, expiredNames, "old1")
+	assert.Contains(t, expiredNames, "old2")
+	assert.NotContains(t, expiredNames, "fresh")
+}
+
+func TestBlobMemoryCache_RemoveBatch_Success(t *testing.T) {
+	cache := NewBlobMemoryCache(
+		BlobMemoryCacheConfig{MaxSize: 1000},
+		tally.NoopScope,
+	)
+
+	entries := []*MemoryEntry{
+		{Name: "blob1", Data: make([]byte, 100), Size: 100},
+		{Name: "blob2", Data: make([]byte, 200), Size: 200},
+		{Name: "blob3", Data: make([]byte, 300), Size: 300},
+	}
+
+	for _, entry := range entries {
+		_, err := cache.Add(entry)
+		require.NoError(t, err)
+	}
+
+	cache.RemoveBatch([]string{"blob1", "blob2"})
+
+	assert.Equal(t, 1, cache.Size())
+	assert.Equal(t, int64(300), cache.TotalBytes())
+	assert.Nil(t, cache.Get("blob1"))
+	assert.Nil(t, cache.Get("blob2"))
+	assert.NotNil(t, cache.Get("blob3"))
+}
+
+func TestBlobMemoryCache_RemoveBatch_PartialMatch(t *testing.T) {
+	cache := NewBlobMemoryCache(
+		BlobMemoryCacheConfig{MaxSize: 1000},
+		tally.NoopScope,
+	)
+
+	entry := &MemoryEntry{
+		Name: "blob1",
+		Data: make([]byte, 100),
+		Size: 100,
+	}
+	_, err := cache.Add(entry)
+	require.NoError(t, err)
+
+	cache.RemoveBatch([]string{"blob1", "nonexistent"})
+
+	assert.Equal(t, 0, cache.Size())
+	assert.Equal(t, int64(0), cache.TotalBytes())
+}
+
+func TestBlobMemoryCache_RemoveBatch_Empty(t *testing.T) {
+	cache := NewBlobMemoryCache(
+		BlobMemoryCacheConfig{MaxSize: 1000},
+		tally.NoopScope,
+	)
+
+	entry := &MemoryEntry{
+		Name: "blob1",
+		Data: make([]byte, 100),
+		Size: 100,
+	}
+	_, err := cache.Add(entry)
+	require.NoError(t, err)
+
+	cache.RemoveBatch([]string{})
+
+	assert.Equal(t, 1, cache.Size())
+	assert.Equal(t, int64(100), cache.TotalBytes())
+}
