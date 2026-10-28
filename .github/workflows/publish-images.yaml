@@ -18,7 +18,6 @@ concurrency:
 
 env:
   REGISTRY: uber
-  GO_VERSION: '1.24'
 
 permissions:
   contents: read
@@ -31,15 +30,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Download Go modules
+      - name: Build binaries
         run: |
           for attempt in 1 2 3; do
-            go mod download && exit 0
-            echo "go mod download failed (attempt ${attempt}), retrying"
+            make bins && exit 0
+            echo "make bins failed (attempt ${attempt}), retrying"
             sleep $((attempt * 10))
           done
           exit 1
