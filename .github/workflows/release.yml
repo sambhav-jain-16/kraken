@@ -21,8 +21,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Create Release
+  version:
+    name: Compute Version
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     outputs:
@@ -35,6 +35,10 @@ jobs:
       - name: Compute release git context
         id: release_context
         run: make -s release-context >> "$GITHUB_OUTPUT"
+
+      - name: No new commits, skipping release
+        if: steps.release_context.outputs.has_changes == 'false'
+        run: echo "Skipping - no commits since last tag."
 
       - name: Compute next version
         id: next_version
@@ -52,22 +56,24 @@ jobs:
           esac
           echo "tag=v${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub release
-        if: steps.release_context.outputs.has_changes == 'true'
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.next_version.outputs.tag }}
-          name: Release ${{ steps.next_version.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: true
-
-      - name: No new commits, skipping release
-        if: steps.release_context.outputs.has_changes == 'false'
-        run: echo "Skipping - no commits since last tag."
-
   publish:
     name: Publish Images
-    needs: release
-    if: needs.release.outputs.tag != ''
+    needs: version
+    if: needs.version.outputs.tag != ''
     uses: ./.github/workflows/publish-images.yaml
+    with:
+      version: ${{ needs.version.outputs.tag }}
     secrets: inherit
+
+  release:
+    name: Create Release
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: Release ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
